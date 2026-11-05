@@ -1,0 +1,6 @@
+{
+  "name": "NASCAR Trail Racer 500",
+  "description": "High-octane 3D NASCAR trail racing game with 99 cars, a 99-stall pit road featuring tire changers and spark plug inspection, canyon bridges, custom liveries, physics tuning, and immersive HUD telemetry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
