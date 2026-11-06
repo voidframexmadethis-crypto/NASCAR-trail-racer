@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { soundManager } from '@/lib/sound';
-import { Play, Pause, RotateCcw, Trophy, Volume2, VolumeX, MessageSquare, Zap, Sparkles, Wrench } from 'lucide-react';
+import { Play, Pause, RotateCcw, Trophy, Volume2, VolumeX, MessageSquare, Zap, Sparkles, Wrench, Video, Sun, Radio, Eye, Flag, Shield } from 'lucide-react';
 import ModManagerModal, { CarModConfig } from '@/components/ModManagerModal';
 
 interface GameCanvasProps {
@@ -72,6 +72,56 @@ function createLicensePlateTexture(numStr: string) {
   return texture;
 }
 
+// Vintage Motoramic V8 Livery Texture (No numbers, matching 1950s reference photo)
+function createMotoramicLiveryTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#a2e8f5'; // Pale pastel aqua / turquoise
+    ctx.fillRect(0, 0, 512, 256);
+
+    // "MOTORAMIC" text in bold italic black
+    ctx.fillStyle = '#111827';
+    ctx.font = '900 italic 46px Impact, Arial, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('MOTORAMIC', 35, 90);
+
+    // "V8" text
+    ctx.font = '900 italic 40px Impact, Arial, sans-serif';
+    ctx.fillText('V8', 55, 155);
+
+    // Pure-Sensitized badge
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(130, 125, 110, 40);
+    ctx.strokeStyle = '#2563eb';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(130, 125, 110, 40);
+    ctx.fillStyle = '#2563eb';
+    ctx.font = 'bold 15px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('PURE • Sensitized', 185, 150);
+
+    // Chevrolet red box badge
+    ctx.fillStyle = '#dc2626';
+    ctx.fillRect(260, 128, 140, 36);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '900 22px Arial, sans-serif';
+    ctx.fillText('CHEVROLET', 330, 152);
+
+    // Smokey's script on front fender area
+    ctx.fillStyle = '#111827';
+    ctx.font = 'bold italic 22px Georgia, serif';
+    ctx.textAlign = 'left';
+    ctx.fillText("Smokey's", 410, 100);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
 export default function GameCanvas({
   playerColor,
   driverName,
@@ -104,6 +154,32 @@ export default function GameCanvas({
   const [isModModalOpen, setIsModModalOpen] = useState<boolean>(false);
   const [driftNotification, setDriftNotification] = useState<string>('');
 
+  // Camera Mode & Dynamic Race Weather / Atmosphere State
+  const [cameraMode, setCameraMode] = useState<'chase' | 'cockpit' | 'roof' | 'tv'>('chase');
+  const [envPreset, setEnvPreset] = useState<'day' | 'sunset' | 'night' | 'fog'>('sunset');
+  const [spotterAlert, setSpotterAlert] = useState<string>('CREW CHIEF: Radio online. Clear track ahead, push hard!');
+  const [isDraftingActive, setIsDraftingActive] = useState<boolean>(false);
+  const [isSideDrafting, setIsSideDrafting] = useState<boolean>(false);
+
+  const cameraModeRef = useRef<'chase' | 'cockpit' | 'roof' | 'tv'>('chase');
+  const envPresetRef = useRef<'day' | 'sunset' | 'night' | 'fog'>('sunset');
+
+  const cycleCameraMode = useCallback(() => {
+    const modes: Array<'chase' | 'cockpit' | 'roof' | 'tv'> = ['chase', 'cockpit', 'roof', 'tv'];
+    const nextIdx = (modes.indexOf(cameraModeRef.current) + 1) % modes.length;
+    cameraModeRef.current = modes[nextIdx];
+    setCameraMode(modes[nextIdx]);
+    soundManager.playOvertakeBlip();
+  }, []);
+
+  const cycleWeatherPreset = useCallback(() => {
+    const presets: Array<'day' | 'sunset' | 'night' | 'fog'> = ['sunset', 'night', 'fog', 'day'];
+    const nextIdx = (presets.indexOf(envPresetRef.current) + 1) % presets.length;
+    envPresetRef.current = presets[nextIdx];
+    setEnvPreset(presets[nextIdx]);
+    soundManager.playOvertakeBlip();
+  }, []);
+
   // NASCAR 99-Stall Pit Stop & Fresh Tires / Spark Plug Tune State
   const [isPitRequested, setIsPitRequested] = useState<boolean>(false);
   const [isInPitLane, setIsInPitLane] = useState<boolean>(false);
@@ -116,6 +192,11 @@ export default function GameCanvas({
   } | null>(null);
   const [freshTireBuffLaps, setFreshTireBuffLaps] = useState<number>(0);
   const [sparkPlugBoostActive, setSparkPlugBoostActive] = useState<boolean>(false);
+
+  // Vehicle Telemetry & Race Control System State
+  const [tireWearPct, setTireWearPct] = useState<number>(0);
+  const [engineTempDeg, setEngineTempDeg] = useState<number>(185);
+  const [raceFlag, setRaceFlag] = useState<'GREEN' | 'YELLOW' | 'CHECKERED'>('GREEN');
 
   // Step-by-step position ticker & overtake alert
   const [overtakeNotice, setOvertakeNotice] = useState<{ pos: number; direction: 'up' | 'down' } | null>(null);
@@ -192,16 +273,35 @@ export default function GameCanvas({
     if (!canvasRef.current) return;
     const canvas = canvasRef.current;
 
+    const isSoftwareGl = (() => {
+      const gl = document.createElement('canvas').getContext('webgl2');
+      if (!gl) return true;
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
+      const gpu = String(gl.getParameter(param));
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
+    })();
+
     // --- 1. THREE.JS SCENE & LIGHTING ---
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x7ec0ee); // Crisp Sky
     scene.fog = new THREE.FogExp2(0x7ec0ee, 0.0006);
 
     const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 7000);
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      powerPreference: 'high-performance',
+      stencil: false,
+      depth: true,
+    });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = true;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    renderer.shadowMap.enabled = !isSoftwareGl;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     // Direct warm sunlight
@@ -1065,23 +1165,19 @@ export default function GameCanvas({
       hoodOrnament.position.set(0, 1.27, 2.5);
       carGroup.add(hoodOrnament);
 
-      // Roof & Door Number Decals
-      const numMat = new THREE.MeshBasicMaterial({ map: numTex, transparent: true });
-      
-      const roofNum = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.4), numMat);
-      roofNum.rotation.x = -Math.PI / 2;
-      roofNum.position.set(0, 1.85, -0.1);
-      carGroup.add(roofNum);
+      // Motoramic V8 Livery Decals (No numbers on car body, matching reference photo)
+      const liveryTex = createMotoramicLiveryTexture();
+      const liveryMat = new THREE.MeshBasicMaterial({ map: liveryTex, transparent: true });
 
-      const leftDoorNum = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.9), numMat);
-      leftDoorNum.rotation.y = -Math.PI / 2;
-      leftDoorNum.position.set(-1.23, 0.8, -0.1);
-      carGroup.add(leftDoorNum);
+      const leftDoorDecal = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.2), liveryMat);
+      leftDoorDecal.rotation.y = -Math.PI / 2;
+      leftDoorDecal.position.set(-1.23, 0.8, -0.1);
+      carGroup.add(leftDoorDecal);
 
-      const rightDoorNum = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.9), numMat);
-      rightDoorNum.rotation.y = Math.PI / 2;
-      rightDoorNum.position.set(1.23, 0.8, -0.1);
-      carGroup.add(rightDoorNum);
+      const rightDoorDecal = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.2), liveryMat);
+      rightDoorDecal.rotation.y = Math.PI / 2;
+      rightDoorDecal.position.set(1.23, 0.8, -0.1);
+      carGroup.add(rightDoorDecal);
 
       // Front Chrome Grille
       const grille = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.42, 0.1), handleMat);
@@ -1280,6 +1376,12 @@ export default function GameCanvas({
         c.pit = next;
         setIsPitRequested(next);
       }
+      if (e.key === 'c' || e.key === 'C') {
+        cycleCameraMode();
+      }
+      if (e.key === 'v' || e.key === 'V') {
+        cycleWeatherPreset();
+      }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -1439,6 +1541,8 @@ export default function GameCanvas({
           setPitServiceStatus(null);
           setFreshTireBuffLaps(2); // Fresh tire grip & spark plug boost for 2 full laps!
           setSparkPlugBoostActive(true);
+          setTireWearPct(0); // 100% fresh tires!
+          setEngineTempDeg(182); // Engine cooled & tuned!
           soundManager.playDriftReturnBoost();
           speedMPH = 35; // Fast pit exit surge
         }
@@ -1573,6 +1677,33 @@ export default function GameCanvas({
 
       // Lock height flush to track elevation over hills
       carWorldPos.y = currentSplinePoint.y + 0.1;
+
+      // --- STAGE 1 & 2: ROBUST VEHICLE-TO-VEHICLE 3D PHYSICS COLLISIONS ---
+      // Check collision between player and all AI cars
+      cars.forEach((otherCar) => {
+        if (otherCar.isPlayer) return;
+        const otherPos = otherCar.mesh.position;
+        const distXZ = Math.hypot(carWorldPos.x - otherPos.x, carWorldPos.z - otherPos.z);
+        const collisionThreshold = 3.6; // Stock car body width/length bounding radius
+
+        if (distXZ < collisionThreshold) {
+          // Collision detected! Apply physical separation & momentum reaction
+          const pushDir = new THREE.Vector3(carWorldPos.x - otherPos.x, 0, carWorldPos.z - otherPos.z).normalize();
+          const overlap = collisionThreshold - distXZ;
+          
+          // Push player away naturally
+          carWorldPos.addScaledVector(pushDir, overlap * 0.75);
+          
+          // Slow down player on impact & play crash sound
+          speedMPH = Math.max(10, speedMPH * 0.78);
+          soundManager.playCrash();
+
+          // Kick AI car forward/outward as well
+          otherCar.currentSpeedMPH = Math.max(20, (otherCar.currentSpeedMPH || 71) * 0.85);
+          otherCar.progress += 0.0004 * Math.sign(Math.random() - 0.5);
+        }
+      });
+
       player.mesh.position.copy(carWorldPos);
 
       // Align vehicle up-vector strictly with track surface normal; apply outward drift yaw around track normal
@@ -1869,15 +2000,58 @@ export default function GameCanvas({
         }
       }
 
-      // Third-person chase camera
-      const camTargetPos = new THREE.Vector3()
-        .copy(forwardMovementDir)
-        .multiplyScalar(-15)
-        .add(carWorldPos)
-        .add(new THREE.Vector3(0, 5, 0));
+      // Player Drafting & Side-Drafting Telemetry Check
+      let draftingFound = false;
+      let sideDraftingFound = false;
+      for (let j = 0; j < cars.length; j++) {
+        const other = cars[j];
+        if (other.isPlayer) continue;
+        const dProg = (other.progress - player.progress + 1.0) % 1.0;
+        if (dProg > 0.0004 && dProg < 0.0035) { // Within ~35 meters ahead
+          const lateralGap = Math.abs(other.laneOffset - lateralDist);
+          if (lateralGap < 2.5) {
+            draftingFound = true;
+          } else if (lateralGap < 4.2 && dProg < 0.0012) {
+            sideDraftingFound = true;
+          }
+        }
+      }
+      setIsDraftingActive(draftingFound);
+      setIsSideDrafting(sideDraftingFound);
 
-      camera.position.lerp(camTargetPos, 0.18);
-      camera.lookAt(new THREE.Vector3().copy(carWorldPos).add(new THREE.Vector3(0, 1.5, 0)));
+      // Speed-dependent motion vibration / camera shake
+      const speedRatio = Math.min(1.0, speedMPH / maxPlayerMPH);
+      const camShakeX = (Math.random() - 0.5) * speedRatio * 0.12;
+      const camShakeY = (Math.random() - 0.5) * speedRatio * 0.12;
+
+      // Multi-Camera Perspective Logic (Chase, Cockpit / Hood, Roof, TV Broadcast)
+      const activeCamMode = cameraModeRef.current;
+      const camTargetPos = new THREE.Vector3();
+      const camLookTarget = new THREE.Vector3();
+
+      if (activeCamMode === 'cockpit') {
+        // Hood / Windshield Cockpit POV
+        camTargetPos.copy(carWorldPos).add(new THREE.Vector3(0, 1.25, 0)).addScaledVector(forwardMovementDir, 0.6);
+        camLookTarget.copy(carWorldPos).add(new THREE.Vector3(0, 1.25, 0)).addScaledVector(forwardMovementDir, 35);
+      } else if (activeCamMode === 'roof') {
+        // Roof Camera POV
+        camTargetPos.copy(carWorldPos).add(new THREE.Vector3(0, 1.88, 0)).addScaledVector(forwardMovementDir, -0.2);
+        camLookTarget.copy(carWorldPos).add(new THREE.Vector3(0, 1.4, 0)).addScaledVector(forwardMovementDir, 45);
+      } else if (activeCamMode === 'tv') {
+        // Broadcast TV Trackside Canyon Camera
+        const tvPt = trackCurve.getPointAt((player.progress + 0.04) % 1.0);
+        const tvTan = trackCurve.getTangentAt((player.progress + 0.04) % 1.0).normalize();
+        const tvSide = new THREE.Vector3().crossVectors(tvTan, new THREE.Vector3(0, 1, 0)).normalize();
+        camTargetPos.copy(tvPt).addScaledVector(tvSide, 32).add(new THREE.Vector3(0, 18, 0));
+        camLookTarget.copy(carWorldPos).add(new THREE.Vector3(0, 1.5, 0));
+      } else {
+        // Default Chase Camera (-15m behind, +5m above)
+        camTargetPos.copy(forwardMovementDir).multiplyScalar(-15).add(carWorldPos).add(new THREE.Vector3(camShakeX, 5 + camShakeY, 0));
+        camLookTarget.copy(carWorldPos).add(new THREE.Vector3(0, 1.5, 0));
+      }
+
+      camera.position.lerp(camTargetPos, activeCamMode === 'tv' ? 0.06 : 0.18);
+      camera.lookAt(camLookTarget);
 
       renderer.render(scene, camera);
     };
@@ -1972,6 +2146,16 @@ export default function GameCanvas({
         </div>
       )}
 
+      {/* DRAFTING & SIDE-DRAFTING TELEMETRY BADGE */}
+      {(isDraftingActive || isSideDrafting) && (
+        <div className="absolute top-28 left-1/2 transform -translate-x-1/2 pointer-events-none z-30">
+          <div className="bg-slate-900/90 border-2 border-amber-400 text-amber-300 font-black px-4 py-1.5 rounded-full shadow-[0_0_20px_rgba(251,191,36,0.6)] text-xs uppercase tracking-wider flex items-center gap-2 animate-pulse">
+            <Zap className="w-4 h-4 text-amber-400 fill-amber-400" />
+            {isSideDrafting ? 'DOOR-TO-DOOR SIDE-DRAFTING!' : 'AERODYNAMIC SLIPSTREAM DRAFT! (+2.5 MPH)'}
+          </div>
+        </div>
+      )}
+
       {/* OVERTAKE 1-BY-1 STEP BANNER */}
       {overtakeNotice && overtakeNotice.direction === 'up' && (
         <div className="absolute top-24 left-4 pointer-events-none z-30 animate-bounce">
@@ -2011,6 +2195,15 @@ export default function GameCanvas({
             </div>
           </div>
 
+          {/* RACE CONTROL FLAG STATUS */}
+          <div className="bg-emerald-950/90 border-2 border-emerald-400 px-4 py-2.5 rounded-xl shadow-xl flex items-center gap-2">
+            <Flag className="w-4 h-4 text-emerald-400 fill-emerald-400 animate-pulse" />
+            <div className="flex flex-col">
+              <span className="text-[9px] text-emerald-300 font-bold uppercase tracking-wider">Race Control</span>
+              <span className="text-xs font-black text-emerald-400 uppercase tracking-wide">GREEN FLAG</span>
+            </div>
+          </div>
+
           <button
             onClick={() => {
               const next = !isPitRequested;
@@ -2027,14 +2220,45 @@ export default function GameCanvas({
           </button>
         </div>
 
-        <div className="bg-slate-900/90 border-2 border-amber-500 px-6 py-2.5 rounded-xl shadow-xl flex flex-col items-center">
-          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Speed</span>
-          <div className="text-3xl font-black text-emerald-400 leading-none">
-            {speed} <span className="text-xs text-slate-400">MPH</span>
+        {/* SPEED & TELEMETRY GAUGES */}
+        <div className="flex gap-3">
+          <div className="bg-slate-900/90 border-2 border-amber-500 px-4 py-2 rounded-xl shadow-xl hidden md:flex items-center gap-4">
+            <div className="flex flex-col items-center">
+              <span className="text-[9px] text-slate-400 font-bold uppercase">Tires</span>
+              <span className="text-xs font-black text-emerald-400">{freshTireBuffLaps > 0 ? '100% FRESH' : 'GOOD'}</span>
+            </div>
+            <div className="h-6 w-px bg-slate-700" />
+            <div className="flex flex-col items-center">
+              <span className="text-[9px] text-slate-400 font-bold uppercase">Engine</span>
+              <span className="text-xs font-black text-amber-400">{sparkPlugBoostActive ? '182°F TUNED' : '195°F NORM'}</span>
+            </div>
+          </div>
+
+          <div className="bg-slate-900/90 border-2 border-amber-500 px-6 py-2.5 rounded-xl shadow-xl flex flex-col items-center">
+            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Speed</span>
+            <div className="text-3xl font-black text-emerald-400 leading-none">
+              {speed} <span className="text-xs text-slate-400">MPH</span>
+            </div>
           </div>
         </div>
 
         <div className="flex gap-2 pointer-events-auto">
+          <button
+            onClick={cycleCameraMode}
+            className="bg-slate-900 hover:bg-slate-800 text-white px-3 py-2.5 rounded-xl border border-slate-700 shadow-lg font-black text-xs flex items-center gap-1.5 transition-transform active:scale-95"
+            title="Cycle Camera View (Chase, Cockpit, Roof, TV Broadcast)"
+          >
+            <Video className="w-4 h-4 text-sky-400" />
+            <span className="uppercase text-[10px] hidden sm:inline">{cameraMode}</span>
+          </button>
+          <button
+            onClick={cycleWeatherPreset}
+            className="bg-slate-900 hover:bg-slate-800 text-white px-3 py-2.5 rounded-xl border border-slate-700 shadow-lg font-black text-xs flex items-center gap-1.5 transition-transform active:scale-95"
+            title="Cycle Environment Weather & Sky (Sunset, Night, Fog, Day)"
+          >
+            <Sun className="w-4 h-4 text-amber-400" />
+            <span className="uppercase text-[10px] hidden sm:inline">{envPreset}</span>
+          </button>
           <button
             onClick={() => setIsModModalOpen(true)}
             className="bg-amber-500 hover:bg-amber-400 text-slate-950 px-3.5 py-2.5 rounded-xl border border-amber-300 shadow-lg font-black text-xs flex items-center gap-1.5 transition-transform active:scale-95"
