@@ -150,25 +150,27 @@ class SoundManager {
     } catch (e) {}
   }
 
-  public updateEngine(speedRatio: number) {
+  public updateEngine(speedRatio: number, rpmRatio?: number, isClutchPressed: boolean = false) {
     if (this.isMuted || !this.ctx || !this.isEngineRunning || !this.subOsc || !this.midOsc || !this.raspOsc || !this.engineFilter) return;
 
     const t = this.ctx.currentTime;
-    const clampedRatio = Math.max(0, Math.min(1.2, speedRatio));
+    const effectiveRatio = isClutchPressed 
+      ? 0.34 + Math.random() * 0.06
+      : (rpmRatio !== undefined ? Math.max(0, Math.min(1.2, rpmRatio)) : Math.max(0, Math.min(1.2, speedRatio)));
 
     // Dynamic V8 RPM scaling
-    const baseFreq = 38 + clampedRatio * 110; // 38 Hz idle up to 148 Hz redline
-    this.subOsc.frequency.setTargetAtTime(baseFreq, t, 0.08);
-    this.midOsc.frequency.setTargetAtTime(baseFreq * 2.02, t, 0.08);
-    this.raspOsc.frequency.setTargetAtTime(baseFreq * 3.01, t, 0.08);
+    const baseFreq = 38 + effectiveRatio * 110; // 38 Hz idle up to 148 Hz redline
+    this.subOsc.frequency.setTargetAtTime(baseFreq, t, isClutchPressed ? 0.03 : 0.06);
+    this.midOsc.frequency.setTargetAtTime(baseFreq * 2.02, t, isClutchPressed ? 0.03 : 0.06);
+    this.raspOsc.frequency.setTargetAtTime(baseFreq * 3.01, t, isClutchPressed ? 0.03 : 0.06);
 
     // Open filter cutoff on throttle for intense roaring bark
-    const targetCutoff = 320 + clampedRatio * 1150;
-    this.engineFilter.frequency.setTargetAtTime(targetCutoff, t, 0.09);
+    const targetCutoff = 320 + effectiveRatio * 1150;
+    this.engineFilter.frequency.setTargetAtTime(targetCutoff, t, isClutchPressed ? 0.04 : 0.07);
 
     // Scale rasp harmonic with throttle
     if (this.raspGain) {
-      this.raspGain.gain.setTargetAtTime(0.08 + clampedRatio * 0.22, t, 0.08);
+      this.raspGain.gain.setTargetAtTime(0.08 + effectiveRatio * 0.22, t, 0.06);
     }
   }
 
@@ -331,26 +333,130 @@ class SoundManager {
     }
   }
 
-  public playGearShift() {
+  public playGearShift(isUpshift: boolean = true) {
+    this.playTransmissionShift(1, 2, isUpshift);
+  }
+
+  // Authentic 1950s 4-speed Manual Transmission Shift Sound Synthesis
+  public playTransmissionShift(
+    fromGear: number = 1,
+    toGear: number = 2,
+    isUpshift: boolean = true,
+    volumeScale: number = 1.0
+  ) {
     if (this.isMuted) return;
     this.initCtx();
     if (!this.ctx) return;
 
     try {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(320, this.ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(80, this.ctx.currentTime + 0.16);
+      const now = this.ctx.currentTime;
+      const vol = Math.max(0.1, Math.min(1.5, volumeScale));
 
-      gain.gain.setValueAtTime(0.24, this.ctx.currentTime);
-      gain.gain.linearRampToValueAtTime(0.01, this.ctx.currentTime + 0.16);
+      // 1. Solid Steel Shifter Gate "Clack & Snick" (Hurst floor shifter gate throw)
+      const gateBufferSize = Math.floor(this.ctx.sampleRate * 0.05);
+      const gateBuffer = this.ctx.createBuffer(1, gateBufferSize, this.ctx.sampleRate);
+      const gateData = gateBuffer.getChannelData(0);
+      for (let i = 0; i < gateBufferSize; i++) {
+        gateData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * 0.012));
+      }
+      const gateNoise = this.ctx.createBufferSource();
+      gateNoise.buffer = gateBuffer;
 
-      osc.connect(gain);
-      gain.connect(this.ctx.destination);
-      osc.start();
-      osc.stop(this.ctx.currentTime + 0.16);
-    } catch (e) {}
+      const gateFilter = this.ctx.createBiquadFilter();
+      gateFilter.type = 'bandpass';
+      gateFilter.frequency.setValueAtTime(1450, now);
+      gateFilter.Q.setValueAtTime(3.4, now);
+
+      const gateGain = this.ctx.createGain();
+      gateGain.gain.setValueAtTime(0.38 * vol, now);
+      gateGain.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
+
+      gateNoise.connect(gateFilter);
+      gateFilter.connect(gateGain);
+      gateGain.connect(this.ctx.destination);
+      gateNoise.start(now);
+
+      // Secondary metallic lever impact ping
+      const pingOsc = this.ctx.createOscillator();
+      const pingGain = this.ctx.createGain();
+      pingOsc.type = 'triangle';
+      pingOsc.frequency.setValueAtTime(isUpshift ? 820 : 680, now);
+      pingOsc.frequency.exponentialRampToValueAtTime(340, now + 0.06);
+
+      pingGain.gain.setValueAtTime(0.22 * vol, now);
+      pingGain.gain.exponentialRampToValueAtTime(0.005, now + 0.06);
+
+      pingOsc.connect(pingGain);
+      pingGain.connect(this.ctx.destination);
+      pingOsc.start(now);
+      pingOsc.stop(now + 0.06);
+
+      // 2. Brass Synchronizer Mesh & Dog Teeth Engagement Whine
+      const synchroOsc = this.ctx.createOscillator();
+      const synchroGain = this.ctx.createGain();
+      synchroOsc.type = isUpshift ? 'sawtooth' : 'triangle';
+
+      const startFreq = isUpshift ? 540 + toGear * 75 : 280;
+      const endFreq = isUpshift ? 190 + toGear * 35 : 580 + toGear * 60;
+      synchroOsc.frequency.setValueAtTime(startFreq, now);
+      synchroOsc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.085);
+
+      synchroGain.gain.setValueAtTime(0.24 * vol, now);
+      synchroGain.gain.exponentialRampToValueAtTime(0.005, now + 0.095);
+
+      const synchroFilter = this.ctx.createBiquadFilter();
+      synchroFilter.type = 'lowpass';
+      synchroFilter.frequency.setValueAtTime(2200, now);
+
+      synchroOsc.connect(synchroFilter);
+      synchroFilter.connect(synchroGain);
+      synchroGain.connect(this.ctx.destination);
+      synchroOsc.start(now);
+      synchroOsc.stop(now + 0.095);
+
+      // 3. Heavy Transmission Bellhousing & Flywheel Clutch Thud
+      const thudOsc = this.ctx.createOscillator();
+      const thudGain = this.ctx.createGain();
+      thudOsc.type = 'sine';
+      thudOsc.frequency.setValueAtTime(isUpshift ? 120 : 145, now + 0.02);
+      thudOsc.frequency.exponentialRampToValueAtTime(36, now + 0.16);
+
+      thudGain.gain.setValueAtTime(0.44 * vol, now + 0.02);
+      thudGain.gain.exponentialRampToValueAtTime(0.01, now + 0.16);
+
+      thudOsc.connect(thudGain);
+      thudGain.connect(this.ctx.destination);
+      thudOsc.start(now + 0.02);
+      thudOsc.stop(now + 0.16);
+
+      // 4. Exhaust Pop & Overrun Burble on Upshifts (Unburnt fuel exploding in headers)
+      if (isUpshift && toGear >= 2) {
+        const popTime = now + 0.045;
+        const popBufferSize = Math.floor(this.ctx.sampleRate * 0.08);
+        const popBuffer = this.ctx.createBuffer(1, popBufferSize, this.ctx.sampleRate);
+        const popData = popBuffer.getChannelData(0);
+        for (let i = 0; i < popBufferSize; i++) {
+          popData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * 0.016));
+        }
+        const popSource = this.ctx.createBufferSource();
+        popSource.buffer = popBuffer;
+
+        const popFilter = this.ctx.createBiquadFilter();
+        popFilter.type = 'lowpass';
+        popFilter.frequency.setValueAtTime(380, popTime);
+
+        const popGain = this.ctx.createGain();
+        popGain.gain.setValueAtTime(0.28 * vol, popTime);
+        popGain.gain.exponentialRampToValueAtTime(0.01, popTime + 0.08);
+
+        popSource.connect(popFilter);
+        popFilter.connect(popGain);
+        popGain.connect(this.ctx.destination);
+        popSource.start(popTime);
+      }
+    } catch (e) {
+      console.error('Error in playTransmissionShift:', e);
+    }
   }
 
   public playCrash() {

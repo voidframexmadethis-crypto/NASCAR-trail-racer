@@ -6,6 +6,20 @@ import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUti
 import { soundManager } from '@/lib/sound';
 import { Play, Pause, RotateCcw, Trophy, Volume2, VolumeX, MessageSquare, Zap, Sparkles, Wrench, Video, Sun, Radio, Eye, Flag, Shield } from 'lucide-react';
 import ModManagerModal, { CarModConfig } from '@/components/ModManagerModal';
+import {
+  createDetailedDirtTrailTexture,
+  createDetailedGrassTerrainTexture,
+  createSkidMarkTexture,
+  createVintageBarn,
+  createVintageGasStation,
+  createCoveredBridge,
+  createVintageTruck,
+  createVintageBillboard,
+  createRainSystem,
+  setupRoomEnvironment,
+  createVintageCarInterior,
+  applyWeatherAtmosphere,
+} from '@/components/sceneryHelpers';
 
 interface GameCanvasProps {
   playerColor: string;
@@ -135,6 +149,29 @@ export default function GameCanvas({
 }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  const gameRef = useRef<{
+    renderer?: THREE.WebGLRenderer;
+    scene?: THREE.Scene;
+    camera?: THREE.PerspectiveCamera;
+    trackCurve?: THREE.CatmullRomCurve3;
+    cars: any[];
+    playerCar?: any;
+    controls: { left: boolean; right: boolean; gas: boolean; brake: boolean; pit: boolean; shiftUp: boolean; shiftDown: boolean };
+    raceFinished: boolean;
+    raceStarted: boolean;
+    isPaused: boolean;
+    trafficLights?: THREE.Mesh[];
+    sun?: THREE.DirectionalLight;
+    hemiLight?: THREE.HemisphereLight;
+    dirtMat?: THREE.MeshStandardMaterial;
+  }>({
+    cars: [],
+    controls: { left: false, right: false, gas: false, brake: false, pit: false, shiftUp: false, shiftDown: false },
+    raceFinished: false,
+    raceStarted: false,
+    isPaused: false,
+  });
+
   // UI & Race State
   const [speed, setSpeed] = useState(0);
   const [position, setPosition] = useState(41);
@@ -154,15 +191,20 @@ export default function GameCanvas({
   const [isModModalOpen, setIsModModalOpen] = useState<boolean>(false);
   const [driftNotification, setDriftNotification] = useState<string>('');
 
+  // 4-Speed Manual Transmission State
+  const [currentGear, setCurrentGear] = useState<number>(1);
+  const [shiftIndicator, setShiftIndicator] = useState<string>('');
+  const lastReportedGearRef = useRef<number>(1);
+
   // Camera Mode & Dynamic Race Weather / Atmosphere State
   const [cameraMode, setCameraMode] = useState<'chase' | 'cockpit' | 'roof' | 'tv'>('chase');
-  const [envPreset, setEnvPreset] = useState<'day' | 'sunset' | 'night' | 'fog'>('sunset');
+  const [envPreset, setEnvPreset] = useState<'sunset' | 'day' | 'fog' | 'rain'>('sunset');
   const [spotterAlert, setSpotterAlert] = useState<string>('CREW CHIEF: Radio online. Clear track ahead, push hard!');
   const [isDraftingActive, setIsDraftingActive] = useState<boolean>(false);
   const [isSideDrafting, setIsSideDrafting] = useState<boolean>(false);
 
   const cameraModeRef = useRef<'chase' | 'cockpit' | 'roof' | 'tv'>('chase');
-  const envPresetRef = useRef<'day' | 'sunset' | 'night' | 'fog'>('sunset');
+  const envPresetRef = useRef<'sunset' | 'day' | 'fog' | 'rain'>('sunset');
 
   const cycleCameraMode = useCallback(() => {
     const modes: Array<'chase' | 'cockpit' | 'roof' | 'tv'> = ['chase', 'cockpit', 'roof', 'tv'];
@@ -173,11 +215,29 @@ export default function GameCanvas({
   }, []);
 
   const cycleWeatherPreset = useCallback(() => {
-    const presets: Array<'day' | 'sunset' | 'night' | 'fog'> = ['sunset', 'night', 'fog', 'day'];
+    const presets: Array<'sunset' | 'day' | 'fog' | 'rain'> = ['sunset', 'day', 'fog', 'rain'];
     const nextIdx = (presets.indexOf(envPresetRef.current) + 1) % presets.length;
-    envPresetRef.current = presets[nextIdx];
-    setEnvPreset(presets[nextIdx]);
+    const nextPreset = presets[nextIdx];
+    envPresetRef.current = nextPreset;
+    setEnvPreset(nextPreset);
     soundManager.playOvertakeBlip();
+
+    if (
+      gameRef.current.scene &&
+      gameRef.current.sun &&
+      gameRef.current.hemiLight &&
+      gameRef.current.dirtMat &&
+      gameRef.current.renderer
+    ) {
+      applyWeatherAtmosphere(
+        nextPreset,
+        gameRef.current.scene,
+        gameRef.current.sun,
+        gameRef.current.hemiLight,
+        gameRef.current.dirtMat,
+        gameRef.current.renderer
+      );
+    }
   }, []);
 
   // NASCAR 99-Stall Pit Stop & Fresh Tires / Spark Plug Tune State
@@ -206,26 +266,6 @@ export default function GameCanvas({
 
   const [commentary, setCommentary] = useState<string>('Drivers, start your engines! 99 vintage stock cars ready at the grid!');
   const [isFetchingCommentary, setIsFetchingCommentary] = useState(false);
-
-  const gameRef = useRef<{
-    renderer?: THREE.WebGLRenderer;
-    scene?: THREE.Scene;
-    camera?: THREE.PerspectiveCamera;
-    trackCurve?: THREE.CatmullRomCurve3;
-    cars: any[];
-    playerCar?: any;
-    controls: { left: boolean; right: boolean; gas: boolean; brake: boolean; pit: boolean };
-    raceFinished: boolean;
-    raceStarted: boolean;
-    isPaused: boolean;
-    trafficLights?: THREE.Mesh[];
-  }>({
-    cars: [],
-    controls: { left: false, right: false, gas: false, brake: false, pit: false },
-    raceFinished: false,
-    raceStarted: false,
-    isPaused: false,
-  });
 
   const lastCommentaryTimeRef = useRef<number>(0);
 
@@ -285,8 +325,8 @@ export default function GameCanvas({
 
     // --- 1. THREE.JS SCENE & LIGHTING ---
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x7ec0ee); // Crisp Sky
-    scene.fog = new THREE.FogExp2(0x7ec0ee, 0.0006);
+    scene.background = new THREE.Color(0xd97736); // Initial sunset color
+    scene.fog = new THREE.FogExp2(0xd97736, 0.00045);
 
     const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 7000);
     const renderer = new THREE.WebGLRenderer({
@@ -300,14 +340,20 @@ export default function GameCanvas({
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
+    renderer.toneMappingExposure = 1.2;
     renderer.shadowMap.enabled = !isSoftwareGl;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-    // Direct warm sunlight
-    scene.add(new THREE.AmbientLight(0xfff8ee, 0.7));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.4);
-    sun.position.set(300, 600, 400);
+    // Physical RoomEnvironment for authentic clearcoat and chrome reflections
+    setupRoomEnvironment(renderer, scene);
+
+    // Direct Sunlight & Atmospheric Sky Hemispheric Light
+    scene.add(new THREE.AmbientLight(0xfff8ee, 0.35));
+    const hemiLight = new THREE.HemisphereLight(0xffd1a4, 0x3e2723, 0.85);
+    scene.add(hemiLight);
+
+    const sun = new THREE.DirectionalLight(0xffaa55, 1.7);
+    sun.position.set(400, 220, -500);
     sun.castShadow = true;
     sun.shadow.mapSize.width = 2048;
     sun.shadow.mapSize.height = 2048;
@@ -317,6 +363,12 @@ export default function GameCanvas({
     sun.shadow.camera.left = -d; sun.shadow.camera.right = d;
     sun.shadow.camera.top = d; sun.shadow.camera.bottom = -d;
     scene.add(sun);
+
+    gameRef.current.renderer = renderer;
+    gameRef.current.scene = scene;
+    gameRef.current.camera = camera;
+    gameRef.current.sun = sun;
+    gameRef.current.hemiLight = hemiLight;
 
     // --- 2. 30-40 MILE CANYON DIRT TRAIL WITH BANKED TURNS ---
     const trackControlPoints = [
@@ -389,11 +441,21 @@ export default function GameCanvas({
     trackGeo.setIndex(indices);
     trackGeo.computeVertexNormals();
 
+    const maxAniso = renderer.capabilities.getMaxAnisotropy();
+    const dirtTex = createDetailedDirtTrailTexture(maxAniso);
+    dirtTex.repeat.set(1, 150);
+
     const dirtMat = new THREE.MeshStandardMaterial({
-      color: 0x6E4225, // Deep dirt brown
-      roughness: 0.95,
+      map: dirtTex,
+      color: 0xffffff,
+      roughness: 0.92,
+      metalness: 0.05,
       side: THREE.DoubleSide,
     });
+    gameRef.current.dirtMat = dirtMat;
+
+    // Synchronize initial atmosphere with lighting and dirt surface response
+    applyWeatherAtmosphere(envPresetRef.current, scene, sun, hemiLight, dirtMat, renderer);
 
     const trackMesh = new THREE.Mesh(trackGeo, dirtMat);
     trackMesh.position.y = 0.1;
@@ -431,9 +493,14 @@ export default function GameCanvas({
     }
     groundGeo.computeVertexNormals();
 
+    const grassTex = createDetailedGrassTerrainTexture(maxAniso);
+    grassTex.repeat.set(60, 60);
+
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0x2e4714, // Mountain forest green
+      map: grassTex,
+      color: 0xffffff,
       roughness: 0.95,
+      metalness: 0.02,
     });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.position.y = -2;
@@ -524,6 +591,122 @@ export default function GameCanvas({
     scene.add(pineFoliageMesh);
     scene.add(oakTrunkMesh);
     scene.add(oakFoliageMesh);
+
+    // --- 3.55. HISTORIC 1940s–1950s COUNTRYSIDE ARCHITECTURE & LANDMARKS ---
+    // 1. Historic Covered Timber Bridge spanning the Canyon Crossing at u = 0.50
+    const bridgePt = trackCurve.getPointAt(0.50);
+    const bridgeTan = trackCurve.getTangentAt(0.50).normalize();
+    const coveredBridge = createCoveredBridge(48, 28, 11);
+    coveredBridge.position.copy(bridgePt);
+    coveredBridge.position.y += 0.2;
+    coveredBridge.rotation.y = Math.atan2(bridgeTan.x, bridgeTan.z);
+    scene.add(coveredBridge);
+
+    // 2. Weathered Red Barn 1 with Grain Silo (Pasture Meadow at u = 0.38)
+    const barn1Pt = trackCurve.getPointAt(0.38);
+    const barn1Tan = trackCurve.getTangentAt(0.38).normalize();
+    const barn1Side = new THREE.Vector3().crossVectors(barn1Tan, new THREE.Vector3(0, 1, 0)).normalize();
+    const barn1 = createVintageBarn();
+    barn1.position.copy(barn1Pt).addScaledVector(barn1Side, 42);
+    barn1.position.y = barn1Pt.y - 0.5;
+    barn1.rotation.y = Math.atan2(barn1Tan.x, barn1Tan.z) - 0.4;
+    scene.add(barn1);
+
+    // Parked 1940s Farm Truck beside Barn 1
+    const truck1 = createVintageTruck(0x2d4a22); // Forest Green
+    truck1.position.copy(barn1Pt).addScaledVector(barn1Side, 30);
+    truck1.position.y = barn1Pt.y;
+    truck1.rotation.y = Math.atan2(barn1Tan.x, barn1Tan.z) + 0.3;
+    scene.add(truck1);
+
+    // 3. Weathered Red Barn 2 with Grain Silo (Mountain Pass at u = 0.72)
+    const barn2Pt = trackCurve.getPointAt(0.72);
+    const barn2Tan = trackCurve.getTangentAt(0.72).normalize();
+    const barn2Side = new THREE.Vector3().crossVectors(barn2Tan, new THREE.Vector3(0, 1, 0)).normalize();
+    const barn2 = createVintageBarn();
+    barn2.position.copy(barn2Pt).addScaledVector(barn2Side, -45);
+    barn2.position.y = barn2Pt.y - 0.5;
+    barn2.rotation.y = Math.atan2(barn2Tan.x, barn2Tan.z) + 0.5;
+    scene.add(barn2);
+
+    // Parked 1940s Farm Truck beside Barn 2
+    const truck2 = createVintageTruck(0x8a3822); // Rust Burgundy
+    truck2.position.copy(barn2Pt).addScaledVector(barn2Side, -32);
+    truck2.position.y = barn2Pt.y;
+    truck2.rotation.y = Math.atan2(barn2Tan.x, barn2Tan.z) - 0.2;
+    scene.add(truck2);
+
+    // 4. 1950s Rural Gas Station (Near Front Straight before Pit Entry at u = 0.82)
+    const gasPt = trackCurve.getPointAt(0.82);
+    const gasTan = trackCurve.getTangentAt(0.82).normalize();
+    const gasSide = new THREE.Vector3().crossVectors(gasTan, new THREE.Vector3(0, 1, 0)).normalize();
+    const gasStation = createVintageGasStation();
+    gasStation.position.copy(gasPt).addScaledVector(gasSide, -32);
+    gasStation.position.y = gasPt.y;
+    gasStation.rotation.y = Math.atan2(gasTan.x, gasTan.z) + Math.PI / 2;
+    scene.add(gasStation);
+
+    // 5. Vintage 1950s Roadside Billboards
+    const bb1Pt = trackCurve.getPointAt(0.18);
+    const bb1Tan = trackCurve.getTangentAt(0.18).normalize();
+    const bb1Side = new THREE.Vector3().crossVectors(bb1Tan, new THREE.Vector3(0, 1, 0)).normalize();
+    const bb1 = createVintageBillboard('CHAMPION', 'SPARK PLUGS • WIN ON SUNDAY', 0x1e3a8a, '#ffffff');
+    bb1.position.copy(bb1Pt).addScaledVector(bb1Side, 26);
+    bb1.position.y = bb1Pt.y;
+    bb1.rotation.y = Math.atan2(bb1Tan.x, bb1Tan.z) + 0.35;
+    scene.add(bb1);
+
+    const bb2Pt = trackCurve.getPointAt(0.62);
+    const bb2Tan = trackCurve.getTangentAt(0.62).normalize();
+    const bb2Side = new THREE.Vector3().crossVectors(bb2Tan, new THREE.Vector3(0, 1, 0)).normalize();
+    const bb2 = createVintageBillboard('PURE-FIREBIRD', 'HIGH-OCTANE RACING FUEL', 0xb91c1c, '#fef08a');
+    bb2.position.copy(bb2Pt).addScaledVector(bb2Side, -26);
+    bb2.position.y = bb2Pt.y;
+    bb2.rotation.y = Math.atan2(bb2Tan.x, bb2Tan.z) - 0.35;
+    scene.add(bb2);
+
+    const bb3Pt = trackCurve.getPointAt(0.92);
+    const bb3Tan = trackCurve.getTangentAt(0.92).normalize();
+    const bb3Side = new THREE.Vector3().crossVectors(bb3Tan, new THREE.Vector3(0, 1, 0)).normalize();
+    const bb3 = createVintageBillboard('MOTORAMIC V8', 'THE HOT ONE IS EVEN HOTTER', 0x0f766e, '#ffffff');
+    bb3.position.copy(bb3Pt).addScaledVector(bb3Side, 26);
+    bb3.position.y = bb3Pt.y;
+    bb3.rotation.y = Math.atan2(bb3Tan.x, bb3Tan.z) + 0.3;
+    scene.add(bb3);
+
+    // --- 3.56. DYNAMIC RUBBER SKID MARKS SYSTEM ---
+    const skidGeo = new THREE.PlaneGeometry(0.85, 1.9);
+    skidGeo.rotateX(-Math.PI / 2);
+    const skidMat = new THREE.MeshBasicMaterial({
+      map: createSkidMarkTexture(),
+      transparent: true,
+      opacity: 0.7,
+      depthWrite: false,
+    });
+    const maxSkidMarks = 300;
+    const skidMarksMesh = new THREE.InstancedMesh(skidGeo, skidMat, maxSkidMarks);
+    skidMarksMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(skidMarksMesh);
+
+    const skidDummy = new THREE.Object3D();
+    skidDummy.scale.set(0, 0, 0);
+    skidDummy.updateMatrix();
+    for (let i = 0; i < maxSkidMarks; i++) skidMarksMesh.setMatrixAt(i, skidDummy.matrix);
+    skidMarksMesh.instanceMatrix.needsUpdate = true;
+
+    let nextSkidIdx = 0;
+    const spawnSkidMark = (pos: THREE.Vector3, heading: number) => {
+      skidDummy.position.set(pos.x, pos.y + 0.12, pos.z);
+      skidDummy.rotation.set(0, heading, 0);
+      skidDummy.scale.set(1, 1, 1);
+      skidDummy.updateMatrix();
+      skidMarksMesh.setMatrixAt(nextSkidIdx, skidDummy.matrix);
+      nextSkidIdx = (nextSkidIdx + 1) % maxSkidMarks;
+      skidMarksMesh.instanceMatrix.needsUpdate = true;
+    };
+
+    // --- 3.57. DYNAMIC RAIN PARTICLE SYSTEM ---
+    const rainSystem = createRainSystem(scene, 1200);
 
     // --- 3.6. NASCAR PIT ROAD (BREAKS OFF TRAIL -> 99 STALLS IN ONE LINE -> TURNS RIGHT BACK TO TRACK) ---
     const uPitStart = 0.865;
@@ -1031,12 +1214,15 @@ export default function GameCanvas({
           allWheels: [],
           brakeLightMat: null,
           body: modelClone,
+          chassis: modelClone,
           isGlb: true,
         };
         return customGroup;
       }
 
       const carGroup = new THREE.Group();
+      const chassisGroup = new THREE.Group();
+      carGroup.add(chassisGroup);
 
       const numTex = createNumberTexture(numStr, colorHex);
       const plateTex = createLicensePlateTexture(numStr);
@@ -1052,48 +1238,54 @@ export default function GameCanvas({
         customTexture.wrapT = THREE.RepeatWrapping;
       }
 
-      // Main Stock Coupe Body
-      const bodyMat = new THREE.MeshStandardMaterial({
+      // Main Stock Coupe Body with Console-Quality Clearcoat Lacquer
+      const bodyMat = new THREE.MeshPhysicalMaterial({
         color: textureUrl ? 0xffffff : colorHex,
-        roughness: 0.22,
-        metalness: 0.45,
+        roughness: 0.18,
+        metalness: 0.25,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.08,
         map: customTexture || null,
       });
       const body = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.95, 5.2), bodyMat);
       body.position.y = 0.75;
       body.castShadow = true;
-      carGroup.add(body);
+      chassisGroup.add(body);
+
+      // Add Authentic 1950s Car Interior (3-Spoke Wheel, Dials, Roll Cage)
+      const interior = createVintageCarInterior();
+      chassisGroup.add(interior);
 
       // Chrome Side Body Spear Trim (running full length of car)
       [-1.22, 1.22].forEach(x => {
         const spear = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.06, 5.0), handleMat);
         spear.position.set(x, 0.72, 0);
-        carGroup.add(spear);
+        chassisGroup.add(spear);
       });
 
       // Curved Roof Cabin Structure
       const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.92, 0.76, 2.45), bodyMat);
       cabin.position.set(0, 1.45, -0.1);
       cabin.castShadow = true;
-      carGroup.add(cabin);
+      chassisGroup.add(cabin);
 
       // Roof Chrome Drip Rails
       [-0.98, 0.98].forEach(x => {
         const dripRail = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 2.45), handleMat);
         dripRail.position.set(x, 1.84, -0.1);
-        carGroup.add(dripRail);
+        chassisGroup.add(dripRail);
       });
 
       // Front Slanted Windshield with Chrome Frame
       const windshieldFrame = new THREE.Mesh(new THREE.BoxGeometry(1.86, 0.72, 0.06), handleMat);
       windshieldFrame.rotation.x = -0.32;
       windshieldFrame.position.set(0, 1.42, 1.15);
-      carGroup.add(windshieldFrame);
+      chassisGroup.add(windshieldFrame);
 
       const windshieldGlass = new THREE.Mesh(new THREE.PlaneGeometry(1.76, 0.64), glassMat);
       windshieldGlass.rotation.x = -0.32;
       windshieldGlass.position.set(0, 1.42, 1.18);
-      carGroup.add(windshieldGlass);
+      chassisGroup.add(windshieldGlass);
 
       // Chrome Windshield Wipers
       [-0.45, 0.45].forEach(x => {
@@ -1101,69 +1293,69 @@ export default function GameCanvas({
         wiper.rotation.z = 0.4;
         wiper.rotation.x = -0.32;
         wiper.position.set(x, 1.25, 1.22);
-        carGroup.add(wiper);
+        chassisGroup.add(wiper);
       });
 
       // Rear Slanted Window with Chrome Frame
       const rearWindowFrame = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.68, 0.06), handleMat);
       rearWindowFrame.rotation.x = 0.35;
       rearWindowFrame.position.set(0, 1.42, -1.35);
-      carGroup.add(rearWindowFrame);
+      chassisGroup.add(rearWindowFrame);
 
       const rearWindowGlass = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.6), glassMat);
       rearWindowGlass.rotation.x = 0.35 + Math.PI;
       rearWindowGlass.position.set(0, 1.42, -1.38);
-      carGroup.add(rearWindowGlass);
+      chassisGroup.add(rearWindowGlass);
 
       // Side Windows with Chrome Trim & Quarter Vent Window Pillars
       [-0.97, 0.97].forEach(x => {
         const sideGlass = new THREE.Mesh(new THREE.PlaneGeometry(2.1, 0.55), glassMat);
         sideGlass.rotation.y = x > 0 ? Math.PI / 2 : -Math.PI / 2;
         sideGlass.position.set(x, 1.45, -0.1);
-        carGroup.add(sideGlass);
+        chassisGroup.add(sideGlass);
 
         const topTrim = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.04, 2.15), handleMat);
         topTrim.position.set(x, 1.74, -0.1);
-        carGroup.add(topTrim);
+        chassisGroup.add(topTrim);
 
         const bottomTrim = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.04, 2.15), handleMat);
         bottomTrim.position.set(x, 1.16, -0.1);
-        carGroup.add(bottomTrim);
+        chassisGroup.add(bottomTrim);
 
         const ventDivider = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.56, 0.03), handleMat);
         ventDivider.position.set(x, 1.45, 0.45);
-        carGroup.add(ventDivider);
+        chassisGroup.add(ventDivider);
 
         const bPillar = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.56, 0.05), handleMat);
         bPillar.position.set(x, 1.45, -0.3);
-        carGroup.add(bPillar);
+        chassisGroup.add(bPillar);
       });
 
       // Door Seams / Panels & Chrome Handles with Push-Button Keyholes
       [-1.21, 1.21].forEach(x => {
         const doorPanel = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.72, 1.85), new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.9 }));
         doorPanel.position.set(x, 0.78, -0.1);
-        carGroup.add(doorPanel);
+        chassisGroup.add(doorPanel);
 
         const handle = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.32), handleMat);
         handle.position.set(x * 1.025, 1.05, -0.2);
-        carGroup.add(handle);
+        chassisGroup.add(handle);
 
         const keyhole = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.04, 8), handleMat);
         keyhole.rotation.z = Math.PI / 2;
         keyhole.position.set(x * 1.03, 0.98, -0.2);
-        carGroup.add(keyhole);
+        chassisGroup.add(keyhole);
       });
 
       // Chrome Hood Spear & Vintage Hood Ornament
       const hoodSpear = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.04, 2.2), handleMat);
       hoodSpear.position.set(0, 1.24, 1.4);
-      carGroup.add(hoodSpear);
+      chassisGroup.add(hoodSpear);
 
       const hoodOrnament = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.25, 8), handleMat);
       hoodOrnament.rotation.x = -Math.PI / 2;
       hoodOrnament.position.set(0, 1.27, 2.5);
-      carGroup.add(hoodOrnament);
+      chassisGroup.add(hoodOrnament);
 
       // Motoramic V8 Livery Decals (No numbers on car body, matching reference photo)
       const liveryTex = createMotoramicLiveryTexture();
@@ -1172,17 +1364,17 @@ export default function GameCanvas({
       const leftDoorDecal = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.2), liveryMat);
       leftDoorDecal.rotation.y = -Math.PI / 2;
       leftDoorDecal.position.set(-1.23, 0.8, -0.1);
-      carGroup.add(leftDoorDecal);
+      chassisGroup.add(leftDoorDecal);
 
       const rightDoorDecal = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.2), liveryMat);
       rightDoorDecal.rotation.y = Math.PI / 2;
       rightDoorDecal.position.set(1.23, 0.8, -0.1);
-      carGroup.add(rightDoorDecal);
+      chassisGroup.add(rightDoorDecal);
 
       // Front Chrome Grille
       const grille = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.42, 0.1), handleMat);
       grille.position.set(0, 0.65, 2.55);
-      carGroup.add(grille);
+      chassisGroup.add(grille);
 
       // Front Headlights with Chrome Bezels & Glass Lenses
       const lightLensMat = new THREE.MeshStandardMaterial({ color: 0xfffae0, emissive: 0xfffae0, emissiveIntensity: 1.1, roughness: 0.1 });
@@ -1190,23 +1382,23 @@ export default function GameCanvas({
         const bezel = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.12, 16), handleMat);
         bezel.rotation.x = Math.PI / 2;
         bezel.position.set(x, 0.75, 2.54);
-        carGroup.add(bezel);
+        chassisGroup.add(bezel);
 
         const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.13, 16), lightLensMat);
         lens.rotation.x = Math.PI / 2;
         lens.position.set(x, 0.75, 2.56);
-        carGroup.add(lens);
+        chassisGroup.add(lens);
       });
 
       // Front Bumper with Vertical Overriders
       const frontBumper = new THREE.Mesh(new THREE.BoxGeometry(2.48, 0.26, 0.26), handleMat);
       frontBumper.position.set(0, 0.45, 2.64);
-      carGroup.add(frontBumper);
+      chassisGroup.add(frontBumper);
 
       [-0.6, 0.6].forEach(x => {
         const overrider = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.44, 0.16), handleMat);
         overrider.position.set(x, 0.54, 2.7);
-        carGroup.add(overrider);
+        chassisGroup.add(overrider);
       });
 
       // Dynamic Rear Brake Lights & Tail Lights
@@ -1221,37 +1413,37 @@ export default function GameCanvas({
         const bezel = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.12, 16), handleMat);
         bezel.rotation.x = Math.PI / 2;
         bezel.position.set(x, 0.75, -2.54);
-        carGroup.add(bezel);
+        chassisGroup.add(bezel);
 
         const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.13, 16), tailLensMat);
         lens.rotation.x = Math.PI / 2;
         lens.position.set(x, 0.75, -2.56);
-        carGroup.add(lens);
+        chassisGroup.add(lens);
       });
 
       // Rear Bumper with Overriders & License Plate
       const rearBumper = new THREE.Mesh(new THREE.BoxGeometry(2.48, 0.26, 0.26), handleMat);
       rearBumper.position.set(0, 0.45, -2.64);
-      carGroup.add(rearBumper);
+      chassisGroup.add(rearBumper);
 
       [-0.6, 0.6].forEach(x => {
         const overrider = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.44, 0.16), handleMat);
         overrider.position.set(x, 0.54, -2.7);
-        carGroup.add(overrider);
+        chassisGroup.add(overrider);
       });
 
       const plateMat = new THREE.MeshBasicMaterial({ map: plateTex });
       const licensePlate = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.3), plateMat);
       licensePlate.rotation.y = Math.PI;
       licensePlate.position.set(0, 0.45, -2.78);
-      carGroup.add(licensePlate);
+      chassisGroup.add(licensePlate);
 
       // Dual Side Exhaust Pipes
       [-1.23, 1.23].forEach(x => {
         const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.8, 12), handleMat);
         pipe.rotation.z = Math.PI / 2;
         pipe.position.set(x, 0.3, 0.5);
-        carGroup.add(pipe);
+        chassisGroup.add(pipe);
       });
 
       // Racing Wheels: Wide Tread Tires with White Sidewall and Chrome Dish Hubcaps
@@ -1296,6 +1488,7 @@ export default function GameCanvas({
         brakeLightMat: tailLensMat,
         body,
         bodyMat,
+        chassis: chassisGroup,
       };
 
       return carGroup;
@@ -1371,6 +1564,8 @@ export default function GameCanvas({
         c.gas = true;
       }
       if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') c.brake = true;
+      if (e.key === 'e' || e.key === 'E') c.shiftUp = true;
+      if (e.key === 'q' || e.key === 'Q') c.shiftDown = true;
       if (e.key === 'p' || e.key === 'P') {
         const next = !c.pit;
         c.pit = next;
@@ -1390,6 +1585,8 @@ export default function GameCanvas({
       if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') c.right = false;
       if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') c.gas = false;
       if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') c.brake = false;
+      if (e.key === 'e' || e.key === 'E') c.shiftUp = false;
+      if (e.key === 'q' || e.key === 'Q') c.shiftDown = false;
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -1429,6 +1626,12 @@ export default function GameCanvas({
     let pitServiceTimer = 0;
     let pitServiceStage = '';
     let pitAssignedStallNum = playerAssignedStallIdx + 1;
+
+    // 4-Speed Manual Transmission Runtime State
+    let playerGear = 1;
+    let shiftClutchTimer = 0;
+    let shiftNoticeTimeout: NodeJS.Timeout | null = null;
+    let lastShiftTime = 0;
 
     const animate = () => {
       const animId = requestAnimationFrame(animate);
@@ -1482,8 +1685,16 @@ export default function GameCanvas({
           setIsRaceStarted(true);
           setCountdownText('GO! GO! GO!');
           soundManager.playCountdownBeep(true);
-          soundManager.playGearShift();
+          soundManager.playTransmissionShift(0, 1, true, 1.1);
           soundManager.startEngine();
+          playerGear = 1;
+          if (lastReportedGearRef.current !== 1) {
+            lastReportedGearRef.current = 1;
+            setCurrentGear(1);
+          }
+          setShiftIndicator('GEAR 1 • ENGAGED');
+          if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+          shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1400);
           
           if (lights) {
             for (let k = 0; k < 3; k++) {
@@ -1545,6 +1756,11 @@ export default function GameCanvas({
           setEngineTempDeg(182); // Engine cooled & tuned!
           soundManager.playDriftReturnBoost();
           speedMPH = 35; // Fast pit exit surge
+          playerGear = 2;
+          if (lastReportedGearRef.current !== 2) {
+            lastReportedGearRef.current = 2;
+            setCurrentGear(2);
+          }
         }
       }
 
@@ -1554,20 +1770,157 @@ export default function GameCanvas({
       if (gameRef.current.raceStarted && !isPittingActive) {
         if (c.gas) {
           speedMPH = Math.min(effectiveTopSpeed, speedMPH + (freshTireBuffLaps > 0 ? 38 : 32) * delta);
-          soundManager.updateEngine(speedMPH / effectiveTopSpeed);
         } else if (c.brake) {
           speedMPH = Math.max(0, speedMPH - 45 * delta);
-          soundManager.updateEngine(speedMPH / effectiveTopSpeed);
         } else {
           if (speedMPH < (isInPitLane ? 40 : 55)) {
             speedMPH = Math.min(isInPitLane ? 40 : 55, speedMPH + 18 * delta);
           } else {
             speedMPH = Math.max(isInPitLane ? 40 : 55, speedMPH - 8 * delta);
           }
-          soundManager.updateEngine(speedMPH / effectiveTopSpeed);
         }
-      } else {
-        if (c.gas && !isPittingActive) soundManager.updateEngine(0.35);
+      }
+
+      // --- 4-SPEED MANUAL TRANSMISSION SHIFTING & AUDIO SYSTEM ---
+      if (shiftClutchTimer > 0) {
+        shiftClutchTimer = Math.max(0, shiftClutchTimer - delta);
+      }
+
+      if (gameRef.current.raceStarted && !isPittingActive) {
+        // Manual override shift controls: E (upshift), Q (downshift)
+        if (c.shiftUp && playerGear < 4 && now - lastShiftTime > 320) {
+          c.shiftUp = false;
+          const prevG = playerGear;
+          playerGear++;
+          shiftClutchTimer = 0.18;
+          lastShiftTime = now;
+          soundManager.playTransmissionShift(prevG, playerGear, true, 1.0);
+          if (lastReportedGearRef.current !== playerGear) {
+            lastReportedGearRef.current = playerGear;
+            setCurrentGear(playerGear);
+          }
+          setShiftIndicator(`SHIFT ➔ ${playerGear}`);
+          if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+          shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+        } else if (c.shiftDown && playerGear > 1 && now - lastShiftTime > 320) {
+          c.shiftDown = false;
+          const prevG = playerGear;
+          playerGear--;
+          shiftClutchTimer = 0.16;
+          lastShiftTime = now;
+          soundManager.playTransmissionShift(prevG, playerGear, false, 1.0);
+          if (lastReportedGearRef.current !== playerGear) {
+            lastReportedGearRef.current = playerGear;
+            setCurrentGear(playerGear);
+          }
+          setShiftIndicator(`DOWNSHIFT ➔ ${playerGear}`);
+          if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+          shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+        } else if (now - lastShiftTime > 380 && shiftClutchTimer <= 0) {
+          // Automatic transmission shifts while driving based on period-accurate speed ranges
+          // Gear 1: 0 - 22 MPH (upshift @ 21)
+          // Gear 2: 20 - 42 MPH (upshift @ 41, downshift @ < 18)
+          // Gear 3: 40 - 62 MPH (upshift @ 61, downshift @ < 36)
+          // Gear 4: 60 - 85+ MPH (downshift @ < 54)
+          if (playerGear === 1 && speedMPH >= 21) {
+            playerGear = 2;
+            shiftClutchTimer = 0.18;
+            lastShiftTime = now;
+            soundManager.playTransmissionShift(1, 2, true, 1.0);
+            if (lastReportedGearRef.current !== 2) {
+              lastReportedGearRef.current = 2;
+              setCurrentGear(2);
+            }
+            setShiftIndicator('SHIFT ➔ 2ND GEAR');
+            if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+            shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+          } else if (playerGear === 2) {
+            if (speedMPH >= 41) {
+              playerGear = 3;
+              shiftClutchTimer = 0.18;
+              lastShiftTime = now;
+              soundManager.playTransmissionShift(2, 3, true, 1.0);
+              if (lastReportedGearRef.current !== 3) {
+                lastReportedGearRef.current = 3;
+                setCurrentGear(3);
+              }
+              setShiftIndicator('SHIFT ➔ 3RD GEAR');
+              if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+              shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+            } else if (speedMPH < 18 && (c.brake || speedMPH < 12)) {
+              playerGear = 1;
+              shiftClutchTimer = 0.16;
+              lastShiftTime = now;
+              soundManager.playTransmissionShift(2, 1, false, 1.0);
+              if (lastReportedGearRef.current !== 1) {
+                lastReportedGearRef.current = 1;
+                setCurrentGear(1);
+              }
+              setShiftIndicator('DOWNSHIFT ➔ 1ST');
+              if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+              shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+            }
+          } else if (playerGear === 3) {
+            if (speedMPH >= 61) {
+              playerGear = 4;
+              shiftClutchTimer = 0.18;
+              lastShiftTime = now;
+              soundManager.playTransmissionShift(3, 4, true, 1.0);
+              if (lastReportedGearRef.current !== 4) {
+                lastReportedGearRef.current = 4;
+                setCurrentGear(4);
+              }
+              setShiftIndicator('SHIFT ➔ 4TH HIGH');
+              if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+              shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+            } else if (speedMPH < 36 && (c.brake || speedMPH < 32)) {
+              playerGear = 2;
+              shiftClutchTimer = 0.16;
+              lastShiftTime = now;
+              soundManager.playTransmissionShift(3, 2, false, 1.0);
+              if (lastReportedGearRef.current !== 2) {
+                lastReportedGearRef.current = 2;
+                setCurrentGear(2);
+              }
+              setShiftIndicator('DOWNSHIFT ➔ 2ND');
+              if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+              shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+            }
+          } else if (playerGear === 4) {
+            if (speedMPH < 54 && (c.brake || speedMPH < 49)) {
+              playerGear = 3;
+              shiftClutchTimer = 0.16;
+              lastShiftTime = now;
+              soundManager.playTransmissionShift(4, 3, false, 1.0);
+              if (lastReportedGearRef.current !== 3) {
+                lastReportedGearRef.current = 3;
+                setCurrentGear(3);
+              }
+              setShiftIndicator('DOWNSHIFT ➔ 3RD');
+              if (shiftNoticeTimeout) clearTimeout(shiftNoticeTimeout);
+              shiftNoticeTimeout = setTimeout(() => setShiftIndicator(''), 1200);
+            }
+          }
+        }
+      }
+
+      // Calculate realistic Gear RPM curve for V8 roar
+      let gearRPM = 0.2;
+      if (playerGear === 1) {
+        gearRPM = 0.18 + (Math.min(22, Math.max(0, speedMPH)) / 22) * 0.78;
+      } else if (playerGear === 2) {
+        gearRPM = 0.44 + ((Math.min(42, Math.max(20, speedMPH)) - 20) / 22) * 0.52;
+      } else if (playerGear === 3) {
+        gearRPM = 0.50 + ((Math.min(62, Math.max(40, speedMPH)) - 40) / 22) * 0.46;
+      } else if (playerGear === 4) {
+        const topRatio = Math.max(0, speedMPH - 60) / Math.max(15, effectiveTopSpeed - 60);
+        gearRPM = 0.58 + Math.min(1.0, topRatio) * 0.44;
+      }
+
+      if (gameRef.current.raceStarted && !isPittingActive) {
+        soundManager.updateEngine(speedMPH / effectiveTopSpeed, gearRPM, shiftClutchTimer > 0);
+      } else if (c.gas && !isPittingActive) {
+        soundManager.updateEngine(0.35, 0.42, false);
       }
 
       // 1. Smooth Steering Input Lag
@@ -1716,6 +2069,25 @@ export default function GameCanvas({
       const playerOrientMatrix = new THREE.Matrix4().makeBasis(carRight, carUp, carForwardOrtho);
       player.mesh.quaternion.setFromRotationMatrix(playerOrientMatrix);
 
+      // Dynamic Chassis Body Roll (turns) & Pitch (braking dive / acceleration squat)
+      if (player.mesh.userData.chassis) {
+        const targetRoll = -currentSteerAngle * 0.12 * (speedMPH / maxPlayerMPH);
+        let targetPitch = 0;
+        if (c.brake) targetPitch = -0.055 * (speedMPH / maxPlayerMPH);
+        else if (c.gas && speedMPH > 5) targetPitch = 0.032;
+
+        player.mesh.userData.chassis.rotation.z = THREE.MathUtils.lerp(
+          player.mesh.userData.chassis.rotation.z,
+          targetRoll,
+          8 * delta
+        );
+        player.mesh.userData.chassis.rotation.x = THREE.MathUtils.lerp(
+          player.mesh.userData.chassis.rotation.x,
+          targetPitch,
+          8 * delta
+        );
+      }
+
       // Gently align heading toward track tangent
       const targetHeading = Math.atan2(splineTan.x, splineTan.z);
       currentHeading = THREE.MathUtils.lerp(currentHeading, targetHeading, 0.035 * (speedMPH / maxPlayerMPH));
@@ -1734,6 +2106,15 @@ export default function GameCanvas({
         spawnDirtSplash(leftTirePos.x, leftTirePos.y, leftTirePos.z, forwardMovementDir, speedMPH / maxPlayerMPH, sprayRate);
         const rightTirePos = rearCenter.clone().addScaledVector(unbankedSide, 1.1);
         spawnDirtSplash(rightTirePos.x, rightTirePos.y, rightTirePos.z, forwardMovementDir, speedMPH / maxPlayerMPH, sprayRate);
+      }
+
+      // --- DYNAMIC RUBBER SKID MARKS (ON HARD BRAKING OR DIRT DRIFT) ---
+      if (gameRef.current.raceStarted && speedMPH > 15 && (c.brake || isDrifting)) {
+        const rearCenter = carWorldPos.clone().addScaledVector(forwardMovementDir, -2.2);
+        const leftTire = rearCenter.clone().addScaledVector(unbankedSide, -1.1);
+        const rightTire = rearCenter.clone().addScaledVector(unbankedSide, 1.1);
+        spawnSkidMark(leftTire, currentHeading);
+        spawnSkidMark(rightTire, currentHeading);
       }
 
       // --- DYNAMIC NASCAR PASSING & OVERTAKING AI FOR ALL 66 CARS ---
@@ -1838,6 +2219,23 @@ export default function GameCanvas({
 
             // Rest of cars go 71 MPH (with drafting boosts during passing)
             car.currentSpeedMPH = 71 + (car.draftBoost || 0) + (Math.sin(now * 0.0012 + car.mesh.id) * 0.8);
+
+            // Periodically check if nearby AI car shifts gears (spatial sound)
+            if (!car.gear) car.gear = 1;
+            const distToUserCar = car.mesh.position.distanceTo(player.mesh.position);
+            if (distToUserCar < 24) {
+              const aiSpeed = car.currentSpeedMPH;
+              if (car.gear === 1 && aiSpeed >= 21) {
+                car.gear = 2;
+                soundManager.playTransmissionShift(1, 2, true, Math.max(0.08, 0.3 * (1 - distToUserCar / 24)));
+              } else if (car.gear === 2 && aiSpeed >= 41) {
+                car.gear = 3;
+                soundManager.playTransmissionShift(2, 3, true, Math.max(0.08, 0.3 * (1 - distToUserCar / 24)));
+              } else if (car.gear === 3 && aiSpeed >= 61) {
+                car.gear = 4;
+                soundManager.playTransmissionShift(3, 4, true, Math.max(0.08, 0.3 * (1 - distToUserCar / 24)));
+              }
+            }
 
             // AI Pitting logic: periodically divert into pit lane
             car.pitCooldown -= delta;
@@ -2053,6 +2451,14 @@ export default function GameCanvas({
       camera.position.lerp(camTargetPos, activeCamMode === 'tv' ? 0.06 : 0.18);
       camera.lookAt(camLookTarget);
 
+      // Dynamic Speed FOV Sensation (50deg idle -> 64deg at top speed)
+      const targetFov = 50 + (speedMPH / maxPlayerMPH) * 14;
+      camera.fov = THREE.MathUtils.lerp(camera.fov, targetFov, 4 * delta);
+      camera.updateProjectionMatrix();
+
+      // Dynamic Rain Particles Update
+      rainSystem.update(delta, camera.position, envPresetRef.current === 'rain');
+
       renderer.render(scene, camera);
     };
 
@@ -2116,7 +2522,7 @@ export default function GameCanvas({
     }
   };
 
-  const bindBtn = (key: 'left' | 'right' | 'gas' | 'brake', isDown: boolean) => {
+  const bindBtn = (key: 'left' | 'right' | 'gas' | 'brake' | 'shiftUp' | 'shiftDown', isDown: boolean) => {
     gameRef.current.controls[key] = isDown;
     if (key === 'gas' && isDown) soundManager.startEngine();
   };
@@ -2136,9 +2542,19 @@ export default function GameCanvas({
         </div>
       )}
 
+      {/* TRANSMISSION SHIFT NOTIFICATION */}
+      {shiftIndicator && (
+        <div className="absolute top-36 left-1/2 transform -translate-x-1/2 pointer-events-none z-30">
+          <div className="bg-amber-500 text-slate-950 font-black px-5 py-2 rounded-full shadow-[0_0_20px_rgba(245,158,11,0.9)] border-2 border-yellow-200 text-sm sm:text-base uppercase tracking-wider animate-bounce flex items-center gap-2">
+            <span>⚙️</span>
+            <span>{shiftIndicator}</span>
+          </div>
+        </div>
+      )}
+
       {/* DIRT DRIFT OVER & RETURN NOTIFICATION */}
       {driftNotification && (
-        <div className="absolute top-36 left-1/2 transform -translate-x-1/2 pointer-events-none z-30">
+        <div className="absolute top-48 left-1/2 transform -translate-x-1/2 pointer-events-none z-30">
           <div className="bg-gradient-to-r from-amber-600 to-rose-600 text-white font-black px-6 py-2.5 rounded-full shadow-[0_0_25px_rgba(245,158,11,0.8)] border-2 border-yellow-300 text-sm sm:text-lg uppercase tracking-wider animate-bounce flex items-center gap-2">
             <Zap className="w-5 h-5 text-yellow-300 fill-yellow-300" />
             {driftNotification}
@@ -2234,6 +2650,17 @@ export default function GameCanvas({
             </div>
           </div>
 
+          {/* 4-SPEED VINTAGE GEAR INDICATOR */}
+          <div className="bg-slate-900/90 border-2 border-amber-500 px-4 py-2 rounded-xl shadow-xl flex flex-col items-center min-w-[72px]">
+            <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Gear</span>
+            <div className="flex items-baseline gap-1">
+              <span className={`text-2xl font-black transition-all ${shiftIndicator ? 'text-amber-300 scale-110' : 'text-amber-400'}`}>
+                {currentGear}
+              </span>
+              <span className="text-[10px] text-slate-500 font-bold">/ 4</span>
+            </div>
+          </div>
+
           <div className="bg-slate-900/90 border-2 border-amber-500 px-6 py-2.5 rounded-xl shadow-xl flex flex-col items-center">
             <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Speed</span>
             <div className="text-3xl font-black text-emerald-400 leading-none">
@@ -2254,7 +2681,7 @@ export default function GameCanvas({
           <button
             onClick={cycleWeatherPreset}
             className="bg-slate-900 hover:bg-slate-800 text-white px-3 py-2.5 rounded-xl border border-slate-700 shadow-lg font-black text-xs flex items-center gap-1.5 transition-transform active:scale-95"
-            title="Cycle Environment Weather & Sky (Sunset, Night, Fog, Day)"
+            title="Cycle Environment Weather & Sky (Sunset, Day, Fog, Rain)"
           >
             <Sun className="w-4 h-4 text-amber-400" />
             <span className="uppercase text-[10px] hidden sm:inline">{envPreset}</span>
@@ -2303,25 +2730,49 @@ export default function GameCanvas({
 
       {/* CONTROLS OVERLAY */}
       <div className="absolute bottom-6 left-6 right-6 flex justify-between items-end pointer-events-none z-20">
-        <div className="flex gap-3 pointer-events-auto">
-          <button
-            className="w-16 h-16 bg-slate-900/90 border-2 border-slate-600 rounded-2xl text-white text-2xl font-black flex items-center justify-center active:bg-amber-500 active:text-slate-950 shadow-xl"
-            onMouseDown={() => bindBtn('left', true)}
-            onMouseUp={() => bindBtn('left', false)}
-            onTouchStart={() => bindBtn('left', true)}
-            onTouchEnd={() => bindBtn('left', false)}
-          >
-            &#9664;
-          </button>
-          <button
-            className="w-16 h-16 bg-slate-900/90 border-2 border-slate-600 rounded-2xl text-white text-2xl font-black flex items-center justify-center active:bg-amber-500 active:text-slate-950 shadow-xl"
-            onMouseDown={() => bindBtn('right', true)}
-            onMouseUp={() => bindBtn('right', false)}
-            onTouchStart={() => bindBtn('right', true)}
-            onTouchEnd={() => bindBtn('right', false)}
-          >
-            &#9654;
-          </button>
+        <div className="flex flex-col gap-2.5 pointer-events-auto">
+          {/* Quick Manual Shift Override Buttons */}
+          <div className="flex gap-2">
+            <button
+              className="px-3 py-1.5 bg-slate-900/90 border border-slate-700 hover:border-amber-400 rounded-xl text-amber-400 text-[11px] font-black uppercase shadow-lg active:bg-amber-500 active:text-slate-950 flex items-center gap-1.5 transition-all"
+              title="Downshift Gear [Q]"
+              onClick={() => {
+                gameRef.current.controls.shiftDown = true;
+              }}
+            >
+              <span>⚙️</span> Q SHIFT -
+            </button>
+            <button
+              className="px-3 py-1.5 bg-slate-900/90 border border-slate-700 hover:border-amber-400 rounded-xl text-amber-400 text-[11px] font-black uppercase shadow-lg active:bg-amber-500 active:text-slate-950 flex items-center gap-1.5 transition-all"
+              title="Upshift Gear [E]"
+              onClick={() => {
+                gameRef.current.controls.shiftUp = true;
+              }}
+            >
+              <span>⚙️</span> E SHIFT +
+            </button>
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              className="w-16 h-16 bg-slate-900/90 border-2 border-slate-600 rounded-2xl text-white text-2xl font-black flex items-center justify-center active:bg-amber-500 active:text-slate-950 shadow-xl"
+              onMouseDown={() => bindBtn('left', true)}
+              onMouseUp={() => bindBtn('left', false)}
+              onTouchStart={() => bindBtn('left', true)}
+              onTouchEnd={() => bindBtn('left', false)}
+            >
+              &#9664;
+            </button>
+            <button
+              className="w-16 h-16 bg-slate-900/90 border-2 border-slate-600 rounded-2xl text-white text-2xl font-black flex items-center justify-center active:bg-amber-500 active:text-slate-950 shadow-xl"
+              onMouseDown={() => bindBtn('right', true)}
+              onMouseUp={() => bindBtn('right', false)}
+              onTouchStart={() => bindBtn('right', true)}
+              onTouchEnd={() => bindBtn('right', false)}
+            >
+              &#9654;
+            </button>
+          </div>
         </div>
 
         <div className="flex gap-3 pointer-events-auto">
